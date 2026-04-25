@@ -100,6 +100,20 @@ _BILLING_PATTERNS = [
     "plan does not include",
 ]
 
+# Patterns that indicate provider overload (serverless cold-start, capacity)
+# These are checked BEFORE rate_limit patterns because some providers
+# (e.g. Z.AI) return 429 with overload semantics rather than 503.
+_OVERLOADED_PATTERNS = [
+    "temporarily overloaded",
+    "server is overloaded",
+    "overloaded",
+    "capacity",
+    "cold start",
+    "warming up",
+    "please try again later",
+    "service unavailable",
+]
+
 # Patterns that indicate rate limiting (transient, will resolve)
 _RATE_LIMIT_PATTERNS = [
     "rate limit",
@@ -589,7 +603,17 @@ def _classify_by_status(
         )
 
     if status_code == 429:
-        # Already checked long_context_tier above; this is a normal rate limit
+        # Check for overload semantics BEFORE generic rate limit — some
+        # providers (Z.AI, serverless GPU hosts) return 429 with "overloaded"
+        # or "capacity" messages when the upstream is cold-starting, not
+        # when the user has hit a quota.  Overloaded gets extended backoff.
+        if any(p in error_msg for p in _OVERLOADED_PATTERNS):
+            return result_fn(
+                FailoverReason.overloaded,
+                retryable=True,
+                should_fallback=True,
+            )
+        # Normal rate limit — already checked long_context_tier above
         return result_fn(
             FailoverReason.rate_limit,
             retryable=True,

@@ -289,6 +289,47 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.overloaded
 
+    # ── 429 with overload semantics (cold-start misclassification fix) ──
+
+    def test_429_temporarily_overloaded_classified_as_overloaded(self):
+        """Z.AI returns 429 with 'temporarily overloaded' — should be overloaded, not rate_limit."""
+        e = MockAPIError("temporarily overloaded", status_code=429)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+        assert result.retryable is True
+        assert result.should_fallback is True
+
+    def test_429_server_overloaded_classified_as_overloaded(self):
+        """Serverless GPU provider 429 with 'server is overloaded' during cold start."""
+        e = MockAPIError("The server is overloaded, please retry later", status_code=429)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+
+    def test_429_overloaded_in_body_classified_as_overloaded(self):
+        """429 with 'overloaded' in the error body should be overloaded, not rate_limit."""
+        e = MockAPIError("Error", status_code=429, body={"error": {"message": "Provider is overloaded"}})
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+
+    def test_429_capacity_classified_as_overloaded(self):
+        """429 mentioning 'capacity' indicates cold-start, not quota."""
+        e = MockAPIError("Insufficient capacity to serve request", status_code=429)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+
+    def test_429_plain_rate_limit_still_rate_limit(self):
+        """429 without overload signals should still be classified as rate_limit."""
+        e = MockAPIError("Too Many Requests", status_code=429)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.should_rotate_credential is True
+
+    def test_429_try_again_later_classified_as_overloaded(self):
+        """429 with 'please try again later' — semantic overload, not rate limit."""
+        e = MockAPIError("please try again later", status_code=429)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+
     # ── Model not found ──
 
     def test_404_model_not_found(self):

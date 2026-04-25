@@ -55,3 +55,42 @@ def jittered_backoff(
     jitter = rng.uniform(0, jitter_ratio * delay)
 
     return delay + jitter
+
+
+# ── Cold-start-aware extended backoff for overloaded providers ──────────
+#
+# Serverless GPU providers (Modal, RunPod, etc.) return 503 "Service
+# Unavailable" while a GPU container cold-starts — typically 30–120
+# seconds.  The default jittered_backoff (5s base, 120s cap) burns
+# through retries too quickly: 5s → 10s → 20s → 40s → 80s → 120s
+# only sums to ~275s of total wait, and the first 3 attempts all fire
+# within 35s when the container needs 60–90s.
+#
+# overloaded_backoff uses a longer base (30s) and higher cap (300s)
+# to survive cold-start windows: 30s → 60s → 120s → 240s → 300s,
+# giving the provider ~5 minutes to come online with only 5 attempts.
+
+_OVERLOADED_BASE_DELAY = 30.0   # seconds — long enough to miss a cold start
+_OVERLOADED_MAX_DELAY = 300.0   # seconds — cap at 5 minutes
+_OVERLOADED_JITTER_RATIO = 0.3  # lower jitter — more predictable waits
+
+
+def overloaded_backoff(attempt: int) -> float:
+    """Compute an extended backoff delay for overloaded/cold-start providers.
+
+    Uses longer timing than :func:`jittered_backoff` because 503/529
+    from serverless providers typically means a GPU container is spinning
+    up (30–120s), not a transient blip that resolves in seconds.
+
+    Args:
+        attempt: 1-based retry attempt number.
+
+    Returns:
+        Delay in seconds with cold-start-appropriate timing.
+    """
+    return jittered_backoff(
+        attempt,
+        base_delay=_OVERLOADED_BASE_DELAY,
+        max_delay=_OVERLOADED_MAX_DELAY,
+        jitter_ratio=_OVERLOADED_JITTER_RATIO,
+    )

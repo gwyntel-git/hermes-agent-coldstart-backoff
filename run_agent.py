@@ -80,7 +80,7 @@ from tools.browser_tool import cleanup_browser
 
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import build_memory_context_block, sanitize_context
-from agent.retry_utils import jittered_backoff
+from agent.retry_utils import jittered_backoff, overloaded_backoff
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
@@ -10884,13 +10884,18 @@ class AIAgent:
                         # Fall through to normal error handling if compression
                         # is exhausted or didn't help.
 
-                    # Eager fallback for rate-limit errors (429 or quota exhaustion).
+                    # Eager fallback for rate-limit errors (429 or quota exhaustion)
+                    # and overloaded providers (503/529 from cold-starting serverless).
                     # When a fallback model is configured, switch immediately instead
                     # of burning through retries with exponential backoff -- the
                     # primary provider won't recover within the retry window.
+                    # Overloaded is included because serverless GPU providers
+                    # (Modal, RunPod) need 30–120s to cold-start, and the default
+                    # short backoff burns retries before the container is ready.
                     is_rate_limited = classified.reason in (
                         FailoverReason.rate_limit,
                         FailoverReason.billing,
+                        FailoverReason.overloaded,
                     )
                     if is_rate_limited and self._fallback_index < len(self._fallback_chain):
                         # Don't eagerly fallback if credential pool rotation may
@@ -11344,7 +11349,17 @@ class AIAgent:
                                     _retry_after = min(int(_ra_raw), 120)  # Cap at 2 minutes
                                 except (TypeError, ValueError):
                                     pass
-                    wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
+                    # Choose backoff strategy based on error reason.
+                    # Overloaded/cold-start errors use extended backoff (30s base,
+                    # 300s cap) because serverless GPU providers need 30–120s to
+                    # spin up containers — the default short backoff (2s base, 60s
+                    # cap) burns retries before the container is ready.
+                    is_overloaded = classified.reason == FailoverReason.overloaded
+                    if is_overloaded and _retry_after is None:
+                        # Cold-start backoff: 30s → 60s → 120s → 240s → 300s
+                        wait_time = overloaded_backoff(retry_count)
+                    else:
+                        wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
                     if is_rate_limited:
                         self._emit_status(f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
                     else:
