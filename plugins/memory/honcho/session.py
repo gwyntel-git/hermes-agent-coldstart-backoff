@@ -999,9 +999,10 @@ class HonchoSessionManager:
         query: str,
         max_tokens: int = 800,
         peer: str = "user",
+        scope: str = "peer",
     ) -> str:
         """
-        Semantic search over Honcho session context.
+        Semantic search over Honcho context.
 
         Returns raw excerpts ranked by relevance to the query. No LLM
         reasoning — cheaper and faster than dialectic_query. Good for
@@ -1012,15 +1013,55 @@ class HonchoSessionManager:
             query: Search query for semantic matching.
             max_tokens: Token budget for returned content.
             peer: Peer alias or explicit peer ID to search about.
+            scope: 'peer' (single peer, default), 'session' (all peers in
+                current session), or 'workspace' (all sessions and peers).
 
         Returns:
             Relevant context excerpts as a string, or empty string if none.
         """
+        # Workspace-wide search uses the Honcho client directly — no session needed
+        if scope == "workspace":
+            try:
+                results = self.honcho.search(query=query, limit=max(5, max_tokens // 100))
+                excerpts = []
+                for r in results:
+                    content = getattr(r, "content", None) or str(r)
+                    excerpts.append(content)
+                if not excerpts:
+                    return ""
+                return "\n\n".join(excerpts)
+            except Exception as e:
+                logger.debug("Honcho workspace search failed: %s", e)
+                return ""
+
         session = self._cache.get(session_key)
         if not session:
             return ""
 
         try:
+            # Session scope: search across all peers in the session
+            if scope == "session":
+                parts = []
+                # Search user peer
+                observer_peer_id, target = self._resolve_observer_target(session, "user")
+                ctx = self._fetch_peer_context(
+                    observer_peer_id, search_query=query, target=target,
+                )
+                if ctx["representation"]:
+                    parts.append(f"## User\n{ctx['representation']}")
+                # Search AI peer
+                try:
+                    observer_peer_id, target = self._resolve_observer_target(session, "ai")
+                    ctx = self._fetch_peer_context(
+                        observer_peer_id, search_query=query, target=target,
+                    )
+                    if ctx["representation"]:
+                        parts.append(f"## AI\n{ctx['representation']}")
+                except Exception:
+                    pass
+                return "\n\n".join(parts) if parts else ""
+
+            # Peer scope (default): single peer search
             observer_peer_id, target = self._resolve_observer_target(session, peer)
 
             ctx = self._fetch_peer_context(

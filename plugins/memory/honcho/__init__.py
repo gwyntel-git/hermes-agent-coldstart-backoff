@@ -62,7 +62,7 @@ SEARCH_SCHEMA = {
         "Semantic search over Honcho's stored context about a peer. "
         "Returns raw excerpts ranked by relevance — no LLM synthesis. "
         "Cheaper and faster than honcho_reasoning. "
-        "Good when you want to find specific past facts and reason over them yourself."
+        "Search any peer or the whole workspace."
     ),
     "parameters": {
         "type": "object",
@@ -77,7 +77,12 @@ SEARCH_SCHEMA = {
             },
             "peer": {
                 "type": "string",
-                "description": "Peer to query. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace.",
+                "description": "Which peer to search: 'user' (default), 'ai', or any named peer (e.g. 'claire', 'snow').",
+            },
+            "scope": {
+                "type": "string",
+                "description": "Search scope: 'peer' (default), 'session' (all peers in current session), or 'workspace' (all sessions and peers).",
+                "enum": ["peer", "session", "workspace"],
             },
         },
         "required": ["query"],
@@ -1163,8 +1168,9 @@ class HonchoMemoryProvider(MemoryProvider):
                     return tool_error("Missing required parameter: query")
                 max_tokens = min(int(args.get("max_tokens", 800)), 2000)
                 peer = args.get("peer", "user")
+                scope = args.get("scope", "peer")
                 result = self._manager.search_context(
-                    self._session_key, query, max_tokens=max_tokens, peer=peer
+                    self._session_key, query, max_tokens=max_tokens, peer=peer, scope=scope
                 )
                 if not result:
                     return json.dumps({"result": "No relevant context found."})
